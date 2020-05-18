@@ -1,0 +1,161 @@
+diff --git a/src/basic/blockdev-util.c b/src/basic/blockdev-util.c
+index 7d94c55a6d..5f8212685b 100644
+--- a/src/basic/blockdev-util.c
++++ b/src/basic/blockdev-util.c
+@@ -1,5 +1,6 @@
+ /* SPDX-License-Identifier: LGPL-2.1+ */
+ 
++#include <sys/file.h>
+ #include <unistd.h>
+ 
+ #include "alloc-util.h"
+@@ -29,6 +30,8 @@ int block_get_whole_disk(dev_t d, dev_t *ret) {
+                 *ret = d;
+                 return 0;
+         }
++        if (errno != ENOENT)
++                return -errno;
+ 
+         /* If it is a partition find the originating device */
+         xsprintf_sys_block_path(p, "/partition", d);
+@@ -185,3 +188,29 @@ int get_block_device_harder(const char *path, dev_t *ret) {
+ 
+         return 1;
+ }
++
++int lock_whole_block_device(dev_t devt, int operation) {
++        _cleanup_free_ char *whole_node = NULL;
++        _cleanup_close_ int lock_fd = -1;
++        dev_t whole_devt;
++        int r;
++
++        /* Let's get a BSD file lock on the whole block device, as per: https://systemd.io/BLOCK_DEVICE_LOCKING */
++
++        r = block_get_whole_disk(devt, &whole_devt);
++        if (r < 0)
++                return r;
++
++        r = device_path_make_major_minor(S_IFBLK, whole_devt, &whole_node);
++        if (r < 0)
++                return r;
++
++        lock_fd = open(whole_node, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
++        if (lock_fd < 0)
++                return -errno;
++
++        if (flock(lock_fd, operation) < 0)
++                return -errno;
++
++        return TAKE_FD(lock_fd);
++}
+diff --git a/src/basic/blockdev-util.h b/src/basic/blockdev-util.h
+index 6d8a796568..1e7588f71c 100644
+--- a/src/basic/blockdev-util.h
++++ b/src/basic/blockdev-util.h
+@@ -18,3 +18,5 @@ int block_get_originating(dev_t d, dev_t *ret);
+ int get_block_device(const char *path, dev_t *dev);
+ 
+ int get_block_device_harder(const char *path, dev_t *dev);
++
++int lock_whole_block_device(dev_t devt, int operation);
+diff --git a/src/cryptsetup/cryptsetup-generator.c b/src/cryptsetup/cryptsetup-generator.c
+index 20c752d88d..5724f88d0a 100644
+--- a/src/cryptsetup/cryptsetup-generator.c
++++ b/src/cryptsetup/cryptsetup-generator.c
+@@ -367,12 +367,12 @@ static int create_disk(
+ 
+         if (tmp)
+                 fprintf(f,
+-                        "ExecStartPost=/sbin/mke2fs '/dev/mapper/%s'\n",
++                        "ExecStartPost=" ROOTLIBEXECDIR "/systemd-makefs ext2 '/dev/mapper/%s'\n",
+                         name_escaped);
+ 
+         if (swap)
+                 fprintf(f,
+-                        "ExecStartPost=/sbin/mkswap '/dev/mapper/%s'\n",
++                        "ExecStartPost=" ROOTLIBEXECDIR "/systemd-makefs swap '/dev/mapper/%s'\n",
+                         name_escaped);
+ 
+         if (keydev)
+diff --git a/src/partition/makefs.c b/src/partition/makefs.c
+index d73d67c4e8..daaab30585 100644
+--- a/src/partition/makefs.c
++++ b/src/partition/makefs.c
+@@ -7,7 +7,9 @@
+ #include <unistd.h>
+ 
+ #include "alloc-util.h"
++#include "blockdev-util.h"
+ #include "dissect-image.h"
++#include "fd-util.h"
+ #include "main-func.h"
+ #include "process-util.h"
+ #include "signal-util.h"
+@@ -42,6 +44,7 @@ static int makefs(const char *type, const char *device) {
+ 
+ static int run(int argc, char *argv[]) {
+         _cleanup_free_ char *device = NULL, *type = NULL, *detected = NULL;
++        _cleanup_close_ int lock_fd = -1;
+         struct stat st;
+         int r;
+ 
+@@ -54,28 +57,31 @@ static int run(int argc, char *argv[]) {
+         /* type and device must be copied because makefs calls safe_fork, which clears argv[] */
+         type = strdup(argv[1]);
+         if (!type)
+-                return -ENOMEM;
++                return log_oom();
+ 
+         device = strdup(argv[2]);
+         if (!device)
+-                return -ENOMEM;
++                return log_oom();
+ 
+         if (stat(device, &st) < 0)
+                 return log_error_errno(errno, "Failed to stat \"%s\": %m", device);
+ 
+-        if (!S_ISBLK(st.st_mode))
++        if (S_ISBLK(st.st_mode)) {
++                /* Lock the device so that udev doesn't interfere with our work */
++
++                lock_fd = lock_whole_block_device(st.st_rdev, LOCK_EX);
++                if (lock_fd < 0)
++                        return log_error_errno(r, "Failed to lock whole block device of \"%s\": %m", device);
++        } else
+                 log_info("%s is not a block device.", device);
+ 
+         r = probe_filesystem(device, &detected);
++        if (r == -EUCLEAN)
++                return log_error_errno(r, "Ambiguous results of probing for file system on \"%s\", refusing to proceed.", device);
+         if (r < 0)
+-                return log_warning_errno(r,
+-                                         r == -EUCLEAN ?
+-                                         "Cannot reliably determine probe \"%s\", refusing to proceed." :
+-                                         "Failed to probe \"%s\": %m",
+-                                         device);
+-
++                return log_error_errno(r, "Failed to probe \"%s\": %m", device);
+         if (detected) {
+-                log_info("%s is not empty (type %s), exiting", device, detected);
++                log_info("'%s' is not empty (contains file system of type %s), exiting.", device, detected);
+                 return 0;
+         }
+ 
+diff --git a/src/shared/dissect-image.c b/src/shared/dissect-image.c
+index 23ad6b06cf..8decac94b2 100644
+--- a/src/shared/dissect-image.c
++++ b/src/shared/dissect-image.c
+@@ -75,10 +75,9 @@ int probe_filesystem(const char *node, char **ret_fstype) {
+                 log_debug("No type detected on partition %s", node);
+                 goto not_found;
+         }
+-        if (r == -2) {
+-                log_debug("Results ambiguous for partition %s", node);
+-                return -EUCLEAN;
+-        }
++        if (r == -2)
++                return log_debug_errno(SYNTHETIC_ERRNO(EUCLEAN),
++                                       "Results ambiguous for partition %s", node);
+         if (r != 0)
+                 return errno_or_else(EIO);
+ 

@@ -6,7 +6,7 @@ pkgbase=systemd
 pkgname=('systemd' 'systemd-libs' 'systemd-resolvconf' 'systemd-sysvcompat')
 _tag='a520e63382396661d79f630b2babe717a85b1209' # git rev-parse v${pkgver}
 pkgver=245.5
-pkgrel=2
+pkgrel=10179
 arch=('x86_64')
 url='https://www.github.com/systemd/systemd'
 makedepends=('acl' 'cryptsetup' 'docbook-xsl' 'gperf' 'lz4' 'xz' 'pam' 'libelf'
@@ -18,8 +18,8 @@ makedepends=('acl' 'cryptsetup' 'docbook-xsl' 'gperf' 'lz4' 'xz' 'pam' 'libelf'
 options=('strip')
 validpgpkeys=('63CDA1E5D3FC22B998D20DD6327F26951A015CC4'  # Lennart Poettering <lennart@poettering.net>
               '5C251B5FC54EB2F80F407AAAC54CA336CFEB557E') # Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl>
-source=("git+https://github.com/systemd/systemd-stable#tag=${_tag}?signed"
-        "git+https://github.com/systemd/systemd#tag=v${pkgver%.*}?signed"
+source=("git+https://github.com/systemd/systemd-stable#tag=${_tag}"
+        "git+https://github.com/systemd/systemd#tag=v${pkgver%.*}"
         '0001-Use-Arch-Linux-device-access-groups.patch'
         '0002-make-homed-userdbd-repart-services-installable.patch'
         'initcpio-hook-udev'
@@ -38,7 +38,8 @@ source=("git+https://github.com/systemd/systemd-stable#tag=${_tag}?signed"
         '30-systemd-sysctl.hook'
         '30-systemd-tmpfiles.hook'
         '30-systemd-udev-reload.hook'
-        '30-systemd-update.hook')
+        '30-systemd-update.hook'
+        '0003-encrypted-swap.patch')
 sha512sums=('SKIP'
             'SKIP'
             'e38c7c422c82953f9c2476a5ab8009d614cbec839e4088bff5db7698ddc84e3d8ed64f32ed323f57b1913c5c9703546f794996cb415ed7cdda930b627962a3c4'
@@ -59,7 +60,8 @@ sha512sums=('SKIP'
             '9426829605bbb9e65002437e02ed54e35c20fdf94706770a3dc1049da634147906d6b98bf7f5e7516c84068396a12c6feaf72f92b51bdf19715e0f64620319de'
             'da7a97d5d3701c70dd5388b0440da39006ee4991ce174777931fea2aa8c90846a622b2b911f02ae4d5fffb92680d9a7e211c308f0f99c04896278e2ee0d9a4dc'
             'a50d202a9c2e91a4450b45c227b295e1840cc99a5e545715d69c8af789ea3dd95a03a30f050d52855cabdc9183d4688c1b534eaa755ebe93616f9d192a855ee3'
-            '825b9dd0167c072ba62cabe0677e7cd20f2b4b850328022540f122689d8b25315005fa98ce867cf6e7460b2b26df16b88bb3b5c9ebf721746dce4e2271af7b97')
+            '825b9dd0167c072ba62cabe0677e7cd20f2b4b850328022540f122689d8b25315005fa98ce867cf6e7460b2b26df16b88bb3b5c9ebf721746dce4e2271af7b97'
+            'c857e8bbe2b603ddf69f451b7c68a3dc1c1e043fa12acd8c8da07bf788d52e764d91561c3bf8f03e49887d1b317dfccb4171df055f3cbe3d37955c9c3f287a8f')
 
 _backports=(
   # systemd-resolved: use hostname for certificate validation in DoT
@@ -102,6 +104,8 @@ prepare() {
 
   # Make homed/userdbd/repart services installable (to allow uninstalling)
   patch -Np1 -i ../0002-make-homed-userdbd-repart-services-installable.patch
+
+  git apply ../0003-encrypted-swap.patch
 }
 
 build() {
